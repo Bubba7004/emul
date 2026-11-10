@@ -216,6 +216,10 @@ class EmulatorJS {
         this.touch = false;
         this.cheats = [];
         this.started = false;
+        this.gamepadPlayerMap = {}; //browser gamepad index -> player index (0-3), -1 = ignored
+        this.gamepadPromptQueue = [];
+        this.gamepadPromptActive = null;
+        this.gamepadPromptEl = null;
         this.volume = (typeof this.config.volume === "number") ? this.config.volume : 0.5;
         if (this.config.defaultControllers) this.defaultControllers = this.config.defaultControllers;
         this.muted = false;
@@ -1066,6 +1070,7 @@ class EmulatorJS {
             this.handleResize();
             this.started = true;
             this.paused = false;
+            this.processGamepadPrompts();
             if (this.touch) {
                 this.virtualGamepad.style.display = "";
             }
@@ -1193,10 +1198,21 @@ class EmulatorJS {
         
         this.gamepad = new GamepadHandler(); //https://github.com/ethanaobrien/Gamepad
         this.gamepad.on('connected', (e) => {
-            if (!this.gamepadLabels) return;
+            if (this.gamepadPlayerMap[e.gamepadIndex] === undefined && !this.gamepadPromptQueue.includes(e.gamepadIndex)) {
+                this.gamepadPromptQueue.push(e.gamepadIndex);
+            }
+            this.processGamepadPrompts();
             this.updateGamepadLabels();
         })
         this.gamepad.on('disconnected', (e) => {
+            delete this.gamepadPlayerMap[e.gamepadIndex];
+            this.gamepadPromptQueue = this.gamepadPromptQueue.filter(i => i !== e.gamepadIndex);
+            if (this.gamepadPromptActive === e.gamepadIndex) {
+                this.gamepadPromptActive = null;
+                if (this.currentPopup === this.gamepadPromptEl) this.closePopup();
+                this.gamepadPromptEl = null;
+                setTimeout(this.processGamepadPrompts.bind(this), 10);
+            }
             setTimeout(this.updateGamepadLabels.bind(this), 10);
         })
         this.gamepad.on('axischanged', this.gamepadEvent.bind(this));
@@ -1216,13 +1232,54 @@ class EmulatorJS {
         }
     }
     updateGamepadLabels() {
+        if (!this.gamepadLabels) return;
         for (let i=0; i<this.gamepadLabels.length; i++) {
-            if (this.gamepad.gamepads[i]) {
-                this.gamepadLabels[i].innerText = this.gamepad.gamepads[i].id;
-            } else {
-                this.gamepadLabels[i].innerText = "n/a";
-            }
+            const ids = this.gamepad.gamepads.filter(pad => pad && this.gamepadPlayerMap[pad.index] === i).map(pad => pad.id);
+            this.gamepadLabels[i].innerText = ids.length ? ids.join(", ") : "n/a";
         }
+    }
+    //Asks which player each newly detected controller should control.
+    processGamepadPrompts() {
+        if (!this.started || !this.gamepad) return;
+        if (this.gamepadPromptActive !== null) {
+            if (this.currentPopup === this.gamepadPromptEl) return;
+            //our prompt was replaced by another popup; ask again later
+            this.gamepadPromptQueue.unshift(this.gamepadPromptActive);
+            this.gamepadPromptActive = null;
+            this.gamepadPromptEl = null;
+        }
+        while (this.gamepadPromptQueue.length) {
+            const index = this.gamepadPromptQueue[0];
+            if (this.gamepadPlayerMap[index] !== undefined || !this.gamepad.gamepads.some(pad => pad && pad.index === index)) {
+                this.gamepadPromptQueue.shift();
+                continue;
+            }
+            break;
+        }
+        if (!this.gamepadPromptQueue.length) return;
+        if (this.isPopupOpen()) {
+            setTimeout(this.processGamepadPrompts.bind(this), 500);
+            return;
+        }
+        const index = this.gamepadPromptQueue.shift();
+        const pad = this.gamepad.gamepads.find(pad => pad && pad.index === index);
+        const choose = (player) => {
+            this.gamepadPlayerMap[index] = player;
+            this.gamepadPromptActive = null;
+            if (this.currentPopup === this.gamepadPromptEl) this.closePopup();
+            this.gamepadPromptEl = null;
+            this.updateGamepadLabels();
+            this.processGamepadPrompts();
+        };
+        const buttons = {};
+        for (let i=0; i<4; i++) {
+            buttons["Player "+(i+1)] = () => choose(i);
+        }
+        buttons["Ignore"] = () => choose(-1);
+        const body = this.createPopup("Controller Detected", buttons);
+        body.innerText = this.localization("Which player should this controller be assigned to?") + "\n" + pad.id;
+        this.gamepadPromptActive = index;
+        this.gamepadPromptEl = this.currentPopup;
     }
     createLink(elem, link, text, useP) {
         const elm = this.createElement("a");
@@ -3103,7 +3160,7 @@ class EmulatorJS {
             if ('buttonup' === e.type || (e.type === "axischanged" && value === 0)) return;
             const num = this.controlPopup.getAttribute("button-num");
             const player = parseInt(this.controlPopup.getAttribute("player-num"));
-            if (e.gamepadIndex !== player) return;
+            if (this.gamepadPlayerMap[e.gamepadIndex] !== player) return;
             if (!this.controls[player][num]) {
                 this.controls[player][num] = {};
             }
@@ -3116,7 +3173,7 @@ class EmulatorJS {
         if (this.settingsMenu.style.display !== "none" || this.isPopupOpen()) return;
         const special = [16, 17, 18, 19, 20, 21, 22, 23];
         for (let i=0; i<4; i++) {
-            if (e.gamepadIndex !== i) continue;
+            if (this.gamepadPlayerMap[e.gamepadIndex] !== i) continue;
             for (let j=0; j<30; j++) {
                 if (!this.controls[i][j] || this.controls[i][j].value2 === undefined) {
                     continue;
